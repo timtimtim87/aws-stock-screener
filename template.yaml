@@ -1,16 +1,15 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: 'Stock Screener - Full data collection system'
+Description: 'Russell 1000 Stock Screener - Complete Production System'
 
 Parameters:
   Environment:
     Type: String
-    Default: dev
+    Default: prod
     Description: Environment name
 
 Globals:
   Function:
-    Timeout: 900  # 15 minutes for full Russell 1000 processing
     Runtime: python3.12
     Environment:
       Variables:
@@ -18,7 +17,7 @@ Globals:
         S3_BUCKET_NAME: !Ref DataBucket
 
 Resources:
-  # S3 Bucket for CSV Data Storage
+  # S3 Bucket for CSV Data Storage (already exists, but include for completeness)
   DataBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -30,11 +29,6 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
-      LifecycleConfiguration:
-        Rules:
-          - Id: DeleteOldVersions
-            Status: Enabled
-            NoncurrentVersionExpirationInDays: 30
 
   # Lambda execution role
   LambdaExecutionRole:
@@ -75,46 +69,52 @@ Resources:
                   - !Sub "${DataBucket.Arn}/*"
 
   # Daily Data Collection Lambda Function
-  DataCollectorFunction:
+  DailyDataCollectorFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: src/data_collector/
+      CodeUri: src/daily_collector/
       Handler: lambda_function.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       MemorySize: 1024
-      Timeout: 900  # 15 minutes
-      Description: 'Daily Russell 1000 stock screening and data collection'
+      Timeout: 900  # 15 minutes for full collection
+      Description: 'Daily Russell 1000 data collection and drawdown analysis'
       Events:
         DailySchedule:
           Type: Schedule
           Properties:
             Schedule: cron(0 11 * * ? *)  # 6 AM ET (11 AM UTC)
-            Description: 'Daily stock screening at 6 AM ET'
-            Enabled: false  # Start disabled for testing
+            Description: 'Daily collection at 6 AM ET'
+            Enabled: true
 
-  # Test Lambda Function (keep for now)
-  TestFunction:
+  # Telegram Bot Lambda Function  
+  TelegramBotFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: src/data_collector/
+      CodeUri: src/telegram_bot/
       Handler: lambda_function.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       MemorySize: 256
-      Timeout: 60
-      Description: 'Test function for credentials and API access'
+      Timeout: 30
+      Description: 'Telegram bot for stock screening commands'
+      Events:
+        TelegramWebhook:
+          Type: Api
+          Properties:
+            Path: /webhook
+            Method: post
 
   # CloudWatch Log Groups
-  DataCollectorLogGroup:
+  DailyCollectorLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub "/aws/lambda/${DataCollectorFunction}"
+      LogGroupName: !Sub "/aws/lambda/${DailyDataCollectorFunction}"
       RetentionInDays: 30
 
-  TestFunctionLogGroup:
+  TelegramBotLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub "/aws/lambda/${TestFunction}"
-      RetentionInDays: 7
+      LogGroupName: !Sub "/aws/lambda/${TelegramBotFunction}"
+      RetentionInDays: 14
 
 Outputs:
   DataBucket:
@@ -123,20 +123,20 @@ Outputs:
     Export:
       Name: !Sub "${Environment}-screener-data-bucket"
   
-  DataCollectorFunctionName:
-    Description: Name of the data collector Lambda function
-    Value: !Ref DataCollectorFunction
+  TelegramWebhookUrl:
+    Description: Telegram webhook URL
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/webhook"
     Export:
-      Name: !Sub "${Environment}-data-collector-function"
-
-  TestFunctionName:
-    Description: Name of the test Lambda function
-    Value: !Ref TestFunction
-    Export:
-      Name: !Sub "${Environment}-test-function-name"
+      Name: !Sub "${Environment}-telegram-webhook-url"
   
-  S3BucketName:
-    Description: S3 bucket name for CSV files
-    Value: !Ref DataBucket
+  DailyCollectorFunctionName:
+    Description: Daily collector function name
+    Value: !Ref DailyDataCollectorFunction
     Export:
-      Name: !Sub "${Environment}-s3-bucket-name"
+      Name: !Sub "${Environment}-daily-collector-function"
+
+  TelegramBotFunctionName:
+    Description: Telegram bot function name  
+    Value: !Ref TelegramBotFunction
+    Export:
+      Name: !Sub "${Environment}-telegram-bot-function"

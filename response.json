@@ -1,1 +1,1 @@
-{"statusCode": 200, "body": "{\"message\": \"Stock screener test successful!\", \"timestamp\": \"2025-11-04T06:28:12.106278\", \"tests\": {\"parameter_store\": true, \"alpaca_connection\": true, \"symbols_loaded\": 5}, \"next_step\": \"Ready for full deployment!\"}"}
+{"statusCode": 200, "body": "{\"date\": \"2025-11-04\", \"stocks_processed\": 0, \"portfolio_positions\": 2, \"worst_drawdown\": 0, \"best_candidate\": null, \"execution_time_seconds\": 3.77, \"csv_files_updated\": 1, \"status\": \"success\"}"}
