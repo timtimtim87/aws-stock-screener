@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: 'Stock Screener Test - First Lambda deployment'
+Description: 'Stock Screener - Full data collection system'
 
 Parameters:
   Environment:
@@ -10,13 +10,32 @@ Parameters:
 
 Globals:
   Function:
-    Timeout: 300
+    Timeout: 900  # 15 minutes for full Russell 1000 processing
     Runtime: python3.12
     Environment:
       Variables:
         ENVIRONMENT: !Ref Environment
+        S3_BUCKET_NAME: !Ref DataBucket
 
 Resources:
+  # S3 Bucket for CSV Data Storage
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "stock-screener-data-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+
   # Lambda execution role
   LambdaExecutionRole:
     Type: AWS::IAM::Role
@@ -41,9 +60,40 @@ Resources:
                   - ssm:GetParameters
                 Resource: 
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/screener/*"
+        - PolicyName: S3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource: 
+                  - !GetAtt DataBucket.Arn
+                  - !Sub "${DataBucket.Arn}/*"
 
-  # Test Lambda Function
-  StockScreenerTestFunction:
+  # Daily Data Collection Lambda Function
+  DataCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/data_collector/
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: 1024
+      Timeout: 900  # 15 minutes
+      Description: 'Daily Russell 1000 stock screening and data collection'
+      Events:
+        DailySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 11 * * ? *)  # 6 AM ET (11 AM UTC)
+            Description: 'Daily stock screening at 6 AM ET'
+            Enabled: false  # Start disabled for testing
+
+  # Test Lambda Function (keep for now)
+  TestFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/data_collector/
@@ -51,24 +101,42 @@ Resources:
       Role: !GetAtt LambdaExecutionRole.Arn
       MemorySize: 256
       Timeout: 60
-      Description: 'Test function for stock screener credentials and API access'
+      Description: 'Test function for credentials and API access'
 
-  # CloudWatch Log Group
+  # CloudWatch Log Groups
+  DataCollectorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${DataCollectorFunction}"
+      RetentionInDays: 30
+
   TestFunctionLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Sub "/aws/lambda/${StockScreenerTestFunction}"
+      LogGroupName: !Sub "/aws/lambda/${TestFunction}"
       RetentionInDays: 7
 
 Outputs:
+  DataBucket:
+    Description: S3 bucket for CSV storage
+    Value: !Ref DataBucket
+    Export:
+      Name: !Sub "${Environment}-screener-data-bucket"
+  
+  DataCollectorFunctionName:
+    Description: Name of the data collector Lambda function
+    Value: !Ref DataCollectorFunction
+    Export:
+      Name: !Sub "${Environment}-data-collector-function"
+
   TestFunctionName:
     Description: Name of the test Lambda function
-    Value: !Ref StockScreenerTestFunction
+    Value: !Ref TestFunction
     Export:
       Name: !Sub "${Environment}-test-function-name"
   
-  TestFunctionArn:
-    Description: ARN of the test Lambda function
-    Value: !GetAtt StockScreenerTestFunction.Arn
+  S3BucketName:
+    Description: S3 bucket name for CSV files
+    Value: !Ref DataBucket
     Export:
-      Name: !Sub "${Environment}-test-function-arn"
+      Name: !Sub "${Environment}-s3-bucket-name"
