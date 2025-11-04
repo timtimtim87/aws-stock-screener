@@ -1,0 +1,74 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Stock Screener Test - First Lambda deployment'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    Description: Environment name
+
+Globals:
+  Function:
+    Timeout: 300
+    Runtime: python3.11
+    Environment:
+      Variables:
+        ENVIRONMENT: !Ref Environment
+
+Resources:
+  # Lambda execution role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ParameterStoreAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: 
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/screener/*"
+
+  # Test Lambda Function
+  StockScreenerTestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/data_collector/
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: 256
+      Timeout: 60
+      Description: 'Test function for stock screener credentials and API access'
+
+  # CloudWatch Log Group
+  TestFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${StockScreenerTestFunction}"
+      RetentionInDays: 7
+
+Outputs:
+  TestFunctionName:
+    Description: Name of the test Lambda function
+    Value: !Ref StockScreenerTestFunction
+    Export:
+      Name: !Sub "${Environment}-test-function-name"
+  
+  TestFunctionArn:
+    Description: ARN of the test Lambda function
+    Value: !GetAtt StockScreenerTestFunction.Arn
+    Export:
+      Name: !Sub "${Environment}-test-function-arn"
