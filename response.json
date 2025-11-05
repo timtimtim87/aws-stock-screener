@@ -1,1 +1,1 @@
-{"statusCode": 200, "body": "{\"date\": \"2025-11-04\", \"stocks_processed\": 0, \"portfolio_positions\": 2, \"worst_drawdown\": 0, \"best_candidate\": null, \"execution_time_seconds\": 3.77, \"csv_files_updated\": 1, \"status\": \"success\"}"}
+{"statusCode": 200, "body": "{\"date\": \"2025-11-05\", \"stocks_analyzed\": 751, \"portfolio_positions\": 1, \"worst_drawdown\": -73.18, \"best_candidate\": \"FI\", \"execution_time_seconds\": 81.65, \"csv_files_updated\": 3, \"data_source\": \"Polygon 180-Day Complete CSV Russell 1000\", \"status\": \"success\"}"}

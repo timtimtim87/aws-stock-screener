@@ -8,14 +8,14 @@ from datetime import datetime, timedelta
 
 def lambda_handler(event, context):
     """
-    Production-ready daily Russell 1000 data collection:
+    Updated Russell 1000 data collection using Polygon.io API:
     - Processes all 991 Russell 1000 stocks
+    - Uses Polygon.io for complete market coverage
     - Calculates 180-day peak-to-current drawdowns
-    - Optimized batch processing with rate limiting
     - Saves results to CSV files in S3
     """
     
-    print("🚀 Starting Russell 1000 data collection...")
+    print("🚀 Starting Russell 1000 data collection with Polygon.io...")
     start_time = time.time()
     
     try:
@@ -23,17 +23,30 @@ def lambda_handler(event, context):
         ssm = boto3.client('ssm')
         s3 = boto3.client('s3')
         
-        # Get credentials
-        api_key = ssm.get_parameter(Name='/screener/alpaca/api_key', WithDecryption=True)['Parameter']['Value']
-        secret_key = ssm.get_parameter(Name='/screener/alpaca/secret_key', WithDecryption=True)['Parameter']['Value']
-        base_url = ssm.get_parameter(Name='/screener/alpaca/base_url')['Parameter']['Value']
+        # Get Polygon API key
+        polygon_api_key = ssm.get_parameter(
+            Name='/screener/polygon/api_key',
+            WithDecryption=True
+        )['Parameter']['Value']
         
-        # Use data API endpoint for historical data
-        data_base_url = "https://data.alpaca.markets"
+        # Get Alpaca credentials for portfolio data
+        alpaca_api_key = ssm.get_parameter(
+            Name='/screener/alpaca/api_key',
+            WithDecryption=True
+        )['Parameter']['Value']
         
-        headers = {
-            'APCA-API-KEY-ID': api_key,
-            'APCA-API-SECRET-KEY': secret_key
+        alpaca_secret_key = ssm.get_parameter(
+            Name='/screener/alpaca/secret_key',
+            WithDecryption=True
+        )['Parameter']['Value']
+        
+        alpaca_base_url = ssm.get_parameter(
+            Name='/screener/alpaca/base_url'
+        )['Parameter']['Value']
+        
+        alpaca_headers = {
+            'APCA-API-KEY-ID': alpaca_api_key,
+            'APCA-API-SECRET-KEY': alpaca_secret_key
         }
         
         today = datetime.now().date()
@@ -41,18 +54,18 @@ def lambda_handler(event, context):
         
         # Get complete Russell 1000 symbols
         symbols = get_russell_1000_symbols()
-        print(f"📊 Processing {len(symbols)} Russell 1000 stocks")
+        print(f"📊 Processing {len(symbols)} Russell 1000 stocks with Polygon.io")
         
-        # Collect screening data with optimized batching
-        screening_data = collect_screening_data(headers, data_base_url, symbols, today)
+        # Collect screening data using Polygon
+        screening_data = collect_screening_data_polygon(polygon_api_key, symbols, today)
         print(f"✅ Collected screening data for {len(screening_data)} stocks")
         
         # Get top 10 candidates
         top_candidates = get_top_candidates(screening_data, today)
         print(f"✅ Identified top 10 candidates")
         
-        # Collect portfolio snapshot
-        portfolio_data = collect_portfolio_data(headers, base_url, today)
+        # Collect portfolio snapshot from Alpaca
+        portfolio_data = collect_portfolio_data(alpaca_headers, alpaca_base_url, today)
         print(f"✅ Collected portfolio data for {len(portfolio_data)} positions")
         
         # Save data to S3
@@ -80,6 +93,7 @@ def lambda_handler(event, context):
             'best_candidate': top_candidates[0]['symbol'] if top_candidates else None,
             'execution_time_seconds': round(execution_time, 2),
             'csv_files_updated': files_saved,
+            'data_source': 'Polygon.io',
             'status': 'success'
         }
         
@@ -98,7 +112,7 @@ def lambda_handler(event, context):
         }
 
 def get_russell_1000_symbols():
-    """Return complete Russell 1000 symbols list (production)"""
+    """Return complete Russell 1000 symbols list"""
     
     symbols = [
         'FI', 'FMC', 'INSP', 'MOH', 'BRBR', 'SFM', 'GLOB', 'DUOL', 'CHTR', 'CAVA',
@@ -198,8 +212,8 @@ def get_russell_1000_symbols():
     # Remove duplicates and return sorted list
     return sorted(list(set(symbols)))
 
-def collect_screening_data(headers, base_url, symbols, date):
-    """Optimized Russell 1000 screening with batch processing and rate limiting"""
+def collect_screening_data_polygon(api_key, symbols, date):
+    """Collect Russell 1000 screening data using Polygon.io API"""
     
     screening_results = []
     
@@ -207,13 +221,13 @@ def collect_screening_data(headers, base_url, symbols, date):
     end_date = date
     start_date = date - timedelta(days=210)  # Buffer for weekends/holidays
     
-    # Process in batches - 200 req/min = 3.33/sec
-    # With 991 symbols, we need smart batching
+    # Polygon.io has generous rate limits for Basic plan: 5 calls/minute
+    # We'll batch by using the grouped daily bars endpoint
     batch_size = 100  # Symbols per request
-    request_delay = 0.4  # 400ms between requests = 2.5 req/sec (under limit)
+    request_delay = 15  # 15 seconds between requests (4 req/min)
     
     total_batches = (len(symbols) + batch_size - 1) // batch_size
-    print(f"📊 Processing {len(symbols)} symbols in {total_batches} batches...")
+    print(f"📊 Processing {len(symbols)} symbols in {total_batches} batches with Polygon.io...")
     
     for batch_num in range(total_batches):
         start_idx = batch_num * batch_size
@@ -223,19 +237,15 @@ def collect_screening_data(headers, base_url, symbols, date):
         print(f"🔄 Batch {batch_num + 1}/{total_batches}: {len(batch_symbols)} symbols")
         
         try:
-            # Make batch request to Alpaca Data API
+            # Use Polygon's grouped daily bars endpoint for efficiency
+            # This gets all symbols' data for a specific date
+            yesterday = date - timedelta(days=1)
+            
             response = requests.get(
-                f"{base_url}/v2/stocks/bars",
-                headers=headers,
+                f"https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{yesterday.isoformat()}",
                 params={
-                    'symbols': ','.join(batch_symbols),
-                    'timeframe': '1Day',
-                    'start': start_date.isoformat(),
-                    'end': end_date.isoformat(),
-                    'adjustment': 'raw',
-                    'limit': 10000,  # Max allowed
-                    'asof': '',
-                    'feed': 'sip'  # Use SIP feed for complete data
+                    'adjusted': 'true',
+                    'apikey': api_key
                 },
                 timeout=30
             )
@@ -243,24 +253,57 @@ def collect_screening_data(headers, base_url, symbols, date):
             if response.status_code == 200:
                 data = response.json()
                 
-                # Process each symbol's data
-                for symbol in batch_symbols:
-                    if symbol in data.get('bars', {}):
-                        bars = data['bars'][symbol]
-                        
-                        if len(bars) >= 30:  # Minimum data requirement
-                            result = calculate_drawdown_metrics(symbol, bars, date)
-                            if result:
-                                screening_results.append(result)
-                        else:
-                            print(f"⚠️  Insufficient data for {symbol}: {len(bars)} bars")
-                    else:
-                        print(f"⚠️  No data returned for {symbol}")
-                        
+                if data.get('status') == 'OK' and 'results' in data:
+                    # Create a lookup dict for yesterday's data
+                    yesterday_data = {}
+                    for result in data['results']:
+                        symbol = result['T']
+                        if symbol in batch_symbols:
+                            yesterday_data[symbol] = {
+                                'close': result['c'],
+                                'high': result['h'],
+                                'low': result['l'],
+                                'open': result['o'],
+                                'volume': result['v']
+                            }
+                    
+                    # Now get historical data for each symbol in this batch
+                    for symbol in batch_symbols:
+                        if symbol in yesterday_data:
+                            try:
+                                # Get 180 days of historical data for drawdown calculation
+                                hist_response = requests.get(
+                                    f"https://api.polygon.io/v2/aggs/ticker/{symbol}/range/1/day/{start_date.isoformat()}/{end_date.isoformat()}",
+                                    params={
+                                        'adjusted': 'true',
+                                        'sort': 'asc',
+                                        'limit': 250,
+                                        'apikey': api_key
+                                    },
+                                    timeout=15
+                                )
+                                
+                                if hist_response.status_code == 200:
+                                    hist_data = hist_response.json()
+                                    
+                                    if hist_data.get('status') == 'OK' and 'results' in hist_data:
+                                        bars = hist_data['results']
+                                        
+                                        if len(bars) >= 30:  # Minimum data requirement
+                                            result = calculate_drawdown_metrics_polygon(symbol, bars, yesterday_data[symbol], date)
+                                            if result:
+                                                screening_results.append(result)
+                                
+                                # Small delay between individual stock requests
+                                time.sleep(0.1)
+                                
+                            except Exception as e:
+                                print(f"⚠️  Error processing {symbol}: {str(e)}")
+                                continue
+                
             elif response.status_code == 429:
-                print(f"⚠️  Rate limited on batch {batch_num + 1}, waiting 30s...")
-                time.sleep(30)
-                # Retry this batch
+                print(f"⚠️  Rate limited on batch {batch_num + 1}, waiting 60s...")
+                time.sleep(60)
                 continue
             else:
                 print(f"⚠️  API error {response.status_code} for batch {batch_num + 1}")
@@ -268,25 +311,28 @@ def collect_screening_data(headers, base_url, symbols, date):
         except Exception as e:
             print(f"⚠️  Error processing batch {batch_num + 1}: {str(e)}")
             
-        # Rate limiting delay (except for last batch)
+        # Rate limiting delay between batches
         if batch_num < total_batches - 1:
+            print(f"⏱️  Waiting {request_delay}s before next batch...")
             time.sleep(request_delay)
     
-    print(f"✅ Processed {len(screening_results)} stocks successfully")
+    print(f"✅ Processed {len(screening_results)} stocks successfully with Polygon.io")
     return screening_results
 
-def calculate_drawdown_metrics(symbol, bars, date):
-    """Calculate drawdown metrics for a single symbol"""
+def calculate_drawdown_metrics_polygon(symbol, historical_bars, latest_bar, date):
+    """Calculate drawdown metrics using Polygon data"""
     
     try:
         # Get current price and calculate drawdown
-        current_price = float(bars[-1]['c'])
-        highs = [float(bar['h']) for bar in bars]
+        current_price = float(latest_bar['close'])
+        highs = [float(bar['h']) for bar in historical_bars]
+        highs.append(float(latest_bar['high']))  # Include today's high
+        
         peak_price = max(highs)
         
         # Find peak index and days since peak
         peak_index = highs.index(peak_price)
-        days_since_peak = len(bars) - 1 - peak_index
+        days_since_peak = len(highs) - 1 - peak_index
         
         # Calculate drawdown percentage
         drawdown_pct = ((current_price - peak_price) / peak_price) * 100
@@ -298,7 +344,7 @@ def calculate_drawdown_metrics(symbol, bars, date):
             'peak_price': round(peak_price, 2),
             'drawdown_pct': round(drawdown_pct, 2),
             'days_since_peak': days_since_peak,
-            'volume': int(bars[-1]['v'])
+            'volume': int(latest_bar['volume'])
         }
         
     except Exception as e:
@@ -330,7 +376,7 @@ def get_top_candidates(screening_data, date):
     return candidates
 
 def collect_portfolio_data(headers, base_url, date):
-    """Collect current portfolio snapshot from trading API"""
+    """Collect current portfolio snapshot from Alpaca"""
     
     portfolio_data = []
     
