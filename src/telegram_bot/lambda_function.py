@@ -10,6 +10,7 @@ def lambda_handler(event, context):
     """
     Russell 1000 Telegram Bot:
     Responds to commands with latest data from S3
+    - /dashboard - Complete daily overview (NEW!)
     - /screen - Top 10 drawdown candidates
     - /portfolio - Current positions  
     - /monitor - Check profit targets
@@ -68,6 +69,8 @@ def lambda_handler(event, context):
             
             if command == '/start' or command == '/help':
                 response = get_help_message(user_name)
+            elif command == '/dashboard' or command == '/daily':
+                response = get_daily_dashboard(s3, bucket_name)
             elif command == '/screen':
                 response = get_screening_results(s3, bucket_name)
             elif command == '/portfolio':
@@ -104,12 +107,201 @@ def lambda_handler(event, context):
             'body': json.dumps({'error': str(e)})
         }
 
+def get_daily_dashboard(s3_client, bucket_name):
+    """
+    NEW: Comprehensive daily dashboard with all key information
+    """
+    
+    try:
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M UTC')
+        
+        # Start building the dashboard
+        dashboard = f"📊 **DAILY DASHBOARD** ({current_time})\n"
+        dashboard += "=" * 40 + "\n\n"
+        
+        # 1. ACCOUNT SUMMARY
+        account_info = get_account_summary_data()
+        if account_info:
+            dashboard += f"💰 **ACCOUNT STATUS**\n"
+            dashboard += f"*Equity:* ${account_info['equity']:,.2f}\n"
+            dashboard += f"*Cash:* ${account_info['cash']:,.2f}\n"
+            dashboard += f"*Buying Power:* ${account_info['buying_power']:,.2f}\n"
+            dashboard += f"*Status:* {account_info['status']}\n\n"
+        else:
+            dashboard += f"💰 **ACCOUNT STATUS**\n❌ Unable to fetch account data\n\n"
+        
+        # 2. PORTFOLIO OVERVIEW
+        portfolio_summary = get_portfolio_summary_data(s3_client, bucket_name)
+        if portfolio_summary and portfolio_summary['positions']:
+            dashboard += f"💼 **PORTFOLIO OVERVIEW**\n"
+            dashboard += f"*Positions:* {portfolio_summary['position_count']}\n"
+            dashboard += f"*Total Value:* ${portfolio_summary['total_value']:,.2f}\n"
+            dashboard += f"*Unrealized P&L:* ${portfolio_summary['total_unrealized']:+,.2f}\n"
+            dashboard += f"*Avg Return:* {portfolio_summary['avg_return']:+.1f}%\n\n"
+            
+            # 3. TOP 5 POSITIONS PERFORMANCE
+            top_5 = portfolio_summary['positions'].head(5)
+            dashboard += f"🏆 **TOP 5 POSITIONS**\n"
+            for _, pos in top_5.iterrows():
+                symbol = pos['symbol']
+                return_pct = pos['unrealized_return_pct']
+                value = pos['market_value']
+                emoji = "🟢" if return_pct > 0 else "🔴"
+                dashboard += f"{emoji} *{symbol}*: {return_pct:+.1f}% (${value:,.0f})\n"
+            dashboard += "\n"
+            
+            # 4. PROFIT TARGET CHECK
+            if len(portfolio_summary['positions']) >= 5:
+                top_5_avg = top_5['unrealized_return_pct'].mean()
+                dashboard += f"🎯 **PROFIT TARGET STATUS**\n"
+                dashboard += f"*Top 5 Avg Return:* {top_5_avg:.1f}%\n"
+                dashboard += f"*Target:* 100.0%\n"
+                
+                if top_5_avg >= 100.0:
+                    dashboard += f"🚨 **TAKE PROFIT SIGNAL!** 🚨\n"
+                    dashboard += f"*Profit to realize:* ${top_5['unrealized_pl'].sum():+,.0f}\n\n"
+                else:
+                    remaining = 100.0 - top_5_avg
+                    dashboard += f"⏳ *Need {remaining:.1f}% more*\n\n"
+            else:
+                dashboard += f"🎯 **PROFIT TARGET STATUS**\n"
+                dashboard += f"*Need 5+ positions for target analysis*\n\n"
+            
+            # 5. ALL POSITIONS DETAIL
+            dashboard += f"📋 **ALL POSITIONS**\n"
+            sorted_positions = portfolio_summary['positions'].sort_values('unrealized_return_pct', ascending=False)
+            for _, pos in sorted_positions.iterrows():
+                symbol = pos['symbol']
+                return_pct = pos['unrealized_return_pct']
+                current = pos['current_price']
+                entry = pos['avg_entry_price']
+                pl = pos['unrealized_pl']
+                emoji = "🟢" if return_pct > 0 else "🔴"
+                dashboard += f"{emoji} *{symbol}*: {return_pct:+.1f}% (${entry:.2f}→${current:.2f}) ${pl:+.0f}\n"
+            dashboard += "\n"
+            
+        else:
+            dashboard += f"💼 **PORTFOLIO OVERVIEW**\n"
+            dashboard += f"*No current positions*\n\n"
+        
+        # 6. TOP 10 SCREENING CANDIDATES
+        screening_data = get_screening_results_data(s3_client, bucket_name)
+        if screening_data and not screening_data.empty:
+            latest_date = screening_data['date'].max()
+            latest_candidates = screening_data[screening_data['date'] == latest_date].head(10)
+            
+            dashboard += f"📉 **TOP 10 BUY CANDIDATES** ({latest_date})\n"
+            dashboard += f"*Worst Russell 1000 drawdowns:*\n"
+            
+            for _, row in latest_candidates.iterrows():
+                rank = int(row.get('rank', 0)) if row.get('rank', 0) else "•"
+                symbol = row['symbol']
+                drawdown = row['drawdown_pct']
+                current = row.get('current_price', 0)
+                peak = row.get('peak_price', 0)
+                days = int(row.get('days_since_peak', 0))
+                
+                dashboard += f"*{rank}. {symbol}*: {drawdown:.1f}%"
+                if current > 0 and peak > 0:
+                    dashboard += f" (${peak:.2f}→${current:.2f}, {days}d)\n"
+                else:
+                    dashboard += f" ({days} days from peak)\n"
+                    
+        else:
+            dashboard += f"📉 **TOP 10 BUY CANDIDATES**\n"
+            dashboard += f"*No screening data available*\n"
+        
+        dashboard += f"\n💡 *Use individual commands (/portfolio, /screen, etc.) for more details*"
+        
+        return dashboard
+        
+    except Exception as e:
+        return f"❌ Error generating dashboard: {str(e)}"
+
+def get_account_summary_data():
+    """Get account data and return as dict"""
+    try:
+        ssm = boto3.client('ssm')
+        
+        api_key = ssm.get_parameter(Name='/screener/alpaca/api_key', WithDecryption=True)['Parameter']['Value']
+        secret_key = ssm.get_parameter(Name='/screener/alpaca/secret_key', WithDecryption=True)['Parameter']['Value']
+        base_url = ssm.get_parameter(Name='/screener/alpaca/base_url')['Parameter']['Value']
+        
+        headers = {
+            'APCA-API-KEY-ID': api_key,
+            'APCA-API-SECRET-KEY': secret_key
+        }
+        
+        response = requests.get(f"{base_url}/v2/account", headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            account = response.json()
+            return {
+                'equity': float(account['equity']),
+                'cash': float(account['cash']),
+                'buying_power': float(account['buying_power']),
+                'status': account['status']
+            }
+        return None
+    except:
+        return None
+
+def get_portfolio_summary_data(s3_client, bucket_name):
+    """Get portfolio data and return processed summary"""
+    try:
+        obj = s3_client.get_object(Bucket=bucket_name, Key='portfolio_snapshots.csv')
+        portfolio_df = pd.read_csv(obj['Body'])
+        
+        if portfolio_df.empty:
+            return None
+        
+        latest_date = portfolio_df['date'].max()
+        current_positions = portfolio_df[portfolio_df['date'] == latest_date]
+        
+        if current_positions.empty:
+            return None
+        
+        total_value = current_positions['market_value'].sum()
+        total_unrealized = current_positions['unrealized_pl'].sum()
+        position_count = len(current_positions)
+        avg_return = current_positions['unrealized_return_pct'].mean()
+        
+        return {
+            'positions': current_positions,
+            'total_value': total_value,
+            'total_unrealized': total_unrealized,
+            'position_count': position_count,
+            'avg_return': avg_return
+        }
+    except:
+        return None
+
+def get_screening_results_data(s3_client, bucket_name):
+    """Get screening data and return DataFrame"""
+    try:
+        try:
+            obj = s3_client.get_object(Bucket=bucket_name, Key='daily_top_candidates.csv')
+            return pd.read_csv(obj['Body'])
+        except:
+            obj = s3_client.get_object(Bucket=bucket_name, Key='russell_1000_drawdown_results.csv')
+            full_df = pd.read_csv(obj['Body'])
+            latest_date = full_df['date'].max()
+            candidates_df = full_df[full_df['date'] == latest_date].head(10).copy()
+            candidates_df['rank'] = range(1, len(candidates_df) + 1)
+            return candidates_df
+    except:
+        return pd.DataFrame()
+
 def get_help_message(user_name):
     """Return help message with available commands"""
     
     return f"""🤖 **Hi {user_name}! Russell 1000 Screener Bot**
 
 📊 **Available Commands:**
+
+*🎯 Quick Access:*
+/dashboard - Complete daily overview (account + portfolio + top stocks)
+/daily - Same as /dashboard
 
 *📈 Market Analysis:*
 /screen - Top 10 worst drawdown stocks (buy candidates)
